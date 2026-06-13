@@ -70,6 +70,9 @@ async def fetch_github_data(username: str) -> Optional[dict]:
     try:
         # User info
         user_resp = await http_client.get(f"{GITHUB_API}/users/{username}")
+        if user_resp.status_code in (403, 429):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=429, detail="GitHub rate limit reached. Please try again later.")
         if user_resp.status_code != 200:
             logger.warning(f"GitHub user not found: {username}")
             return None
@@ -140,6 +143,9 @@ async def fetch_github_data(username: str) -> Optional[dict]:
         _set_cached(f"github:{username}", result)
         return result
     except Exception as e:
+        # Check if it's already our HTTPException
+        if type(e).__name__ == "HTTPException":
+            raise
         logger.error(f"GitHub fetch failed for {username}: {e}")
         return None
 

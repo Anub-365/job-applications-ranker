@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from typing import Optional
+from fastapi.concurrency import run_in_threadpool
 
 from backend.db.database import get_db
 from backend.models.models import User, UserRole, JobDescription, Match, StudentProfile
@@ -33,7 +34,7 @@ async def create_job(
         description=data.description,
         required_skills=data.required_skills,
     )
-    job_embedding = embedding_service.generate_embedding(job_text)
+    job_embedding = await run_in_threadpool(embedding_service.generate_embedding, job_text)
 
     job = JobDescription(
         recruiter_id=user.id,

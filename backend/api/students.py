@@ -9,6 +9,7 @@ from backend.models.models import User, UserRole, StudentProfile, Project, Skill
 from backend.schemas.schemas import StudentProfileOut, StudentProfileUpdate, MatchOut
 from backend.core.security import get_current_user
 from backend.services import resume_service, github_service, embedding_service, skill_service
+from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -90,6 +91,23 @@ async def upload_resume(
     profile.resume_text = result["raw_text"]
     profile.resume_structured = result["structured"]
 
+    # Extract CGPA and map to database column
+    extracted_cgpa = result["structured"].get("education", {}).get("cgpa")
+    if extracted_cgpa is not None:
+        import re
+        try:
+            if isinstance(extracted_cgpa, (int, float)):
+                profile.cgpa = float(extracted_cgpa)
+            else:
+                # Find the first floating point number in the string (e.g. "9.8/10" -> "9.8")
+                match = re.search(r'(\d+\.\d+|\d+)', str(extracted_cgpa))
+                if match:
+                    val = float(match.group(1))
+                    if val <= 10.0:  # Validating scale
+                        profile.cgpa = val
+        except Exception:
+            pass
+
     # Create projects from structured data
     # Clear old projects first
     for old_proj in profile.projects:
@@ -106,7 +124,7 @@ async def upload_resume(
             {"skills": structured.get("skills", []), "projects": [proj_data], "experience": []},
             github_summary=github_summary,
         )
-        embedding = embedding_service.generate_embedding(student_text)
+        embedding = await run_in_threadpool(embedding_service.generate_embedding, student_text)
         project = Project(
             student_id=profile.id,
             title=proj_data.get("title", "Untitled"),
@@ -146,8 +164,9 @@ async def upload_resume(
     saved_count = 0
     for sk in skill_results:
         # GUARDRAIL: Only save if the AI is fairly certain AND not a generic blacklist word
-        # (30.0 is the exact score for a 100% Base match with 0 Project/GitHub evidence = Self-Reported)
-        if sk["confidence_score"] >= 30.0 and not sk.get("is_blacklisted", False):
+        # (30.0 was the exact score for a 100% Base match with 0 Project/GitHub evidence = Self-Reported, 
+        # lowering to 20.0 allows partial matches to render correctly on the frontend)
+        if sk["confidence_score"] >= 20.0 and not sk.get("is_blacklisted", False):
             skill = Skill(
                 student_id=profile.id,
                 skill_name=sk["skill_name"],
@@ -167,7 +186,7 @@ async def upload_resume(
 
     return {
         "message": "Resume processed successfully", 
-        "skills_found": len([s for s in skill_results if s["confidence_score"] >= 30.0 and not s.get("is_blacklisted")]),
+        "skills_found": len([s for s in skill_results if s["confidence_score"] >= 20.0 and not s.get("is_blacklisted")]),
         "all_skills": skill_results,
         "projects_found": len(structured.get("projects", [])),
         "llm_used": result.get("llm", "Unknown")
@@ -226,7 +245,7 @@ async def connect_github(
                 {"skills": profile.resume_structured.get("skills", []), "projects": [proj_data], "experience": []},
                 github_summary=summary,
             )
-            proj.embedding = embedding_service.generate_embedding(student_text)
+            proj.embedding = await run_in_threadpool(embedding_service.generate_embedding, student_text)
         await db.flush()
 
     return {
