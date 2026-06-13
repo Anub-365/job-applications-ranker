@@ -22,7 +22,6 @@ def _check_recruiter(user: User):
 @router.post("/jobs", response_model=JobOut)
 async def create_job(
     data: JobCreate,
-    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -47,8 +46,33 @@ async def create_job(
     db.add(job)
     await db.flush()
 
-    # Run matching in background
-    background_tasks.add_task(_run_matching, str(job.id), job_embedding, data.required_skills)
+    # Run matching INLINE (not background) to guarantee DB persistence
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        results = await matching_service.run_matching_for_job(
+            db, str(job.id), job_embedding, data.required_skills or []
+        )
+        logger.warning(f"[MATCH] Produced {len(results)} candidates for job {job.id}")
+        for r in results:
+            match = Match(
+                student_id=r["student_id"],
+                job_id=r["job_id"],
+                semantic_score=r["semantic_score"],
+                github_score=r["github_score"],
+                skill_score=r["skill_score"],
+                cgpa_score=r["cgpa_score"],
+                final_score=r["final_score"],
+                explanation=r["explanation"],
+                top_project_title=r["top_project_title"],
+            )
+            db.add(match)
+        await db.flush()
+        logger.warning(f"[MATCH] Saved {len(results)} matches to DB for job {job.id}")
+    except Exception as e:
+        logger.error(f"[MATCH] Matching failed for job {job.id}: {e}")
+        import traceback
+        traceback.print_exc()
 
     return job
 
@@ -80,6 +104,9 @@ async def _run_matching(job_id: str, job_embedding: list, required_skills: list)
             await db.commit()
         except Exception as e:
             import logging
+            print(f"CRITICAL ERROR in _run_matching: {e}")
+            import traceback
+            traceback.print_exc()
             logging.getLogger(__name__).error(f"Matching failed for job {job_id}: {e}")
             await db.rollback()
 
@@ -191,7 +218,6 @@ async def get_candidates(
 @router.post("/jobs/{job_id}/rematch")
 async def rematch_job(
     job_id: str,
-    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -213,9 +239,32 @@ async def rematch_job(
         await db.delete(m)
     await db.flush()
 
-    # Re-run matching
-    background_tasks.add_task(
-        _run_matching, str(job.id), list(job.embedding), job.required_skills or []
-    )
+    # Run matching inline
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        results = await matching_service.run_matching_for_job(
+            db, str(job.id), list(job.embedding), job.required_skills or []
+        )
+        for r in results:
+            match = Match(
+                student_id=r["student_id"],
+                job_id=r["job_id"],
+                semantic_score=r["semantic_score"],
+                github_score=r["github_score"],
+                skill_score=r["skill_score"],
+                cgpa_score=r["cgpa_score"],
+                final_score=r["final_score"],
+                explanation=r["explanation"],
+                top_project_title=r["top_project_title"],
+            )
+            db.add(match)
+        await db.flush()
+        logger.warning(f"[REMATCH] Saved {len(results)} matches for job {job.id}")
+    except Exception as e:
+        logger.error(f"[REMATCH] Failed for job {job.id}: {e}")
+        import traceback
+        traceback.print_exc()
 
-    return {"message": "Rematching started"}
+    return {"message": f"Rematching complete. Found {len(results)} candidates."}
+

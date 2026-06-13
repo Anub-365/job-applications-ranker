@@ -5,12 +5,27 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
+import google.generativeai as genai
 from openai import AsyncOpenAI
 
 from backend.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# OpenAI Client
+openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None
+
+# Groq Clients (OpenAI-compatible)
+groq_keys = [settings.GROQ_API_KEY_1, settings.GROQ_API_KEY_2, settings.GROQ_API_KEY_3]
+groq_clients = [
+    AsyncOpenAI(api_key=key, base_url="https://api.groq.com/openai/v1")
+    for key in groq_keys if key
+]
+
+# Gemini Config
+if settings.GEMINI_API_KEY:
+    genai.configure(api_key=settings.GEMINI_API_KEY)
 
 # Simple in-memory cache (24h TTL)
 _cache: dict[str, tuple[float, any]] = {}
@@ -60,10 +75,10 @@ async def fetch_github_data(username: str) -> Optional[dict]:
             return None
         user_data = user_resp.json()
 
-        # Top repos (sorted by updated, limit 15)
+        # Top repos (sorted by updated, limit 100)
         repos_resp = await http_client.get(
             f"{GITHUB_API}/users/{username}/repos",
-            params={"sort": "updated", "per_page": 15, "type": "owner"},
+            params={"sort": "updated", "per_page": 100, "type": "owner"},
         )
         repos = repos_resp.json() if repos_resp.status_code == 200 else []
 
@@ -151,24 +166,19 @@ def compute_github_scores(data: dict) -> dict:
     langs = len(data.get("languages", []))
     diversity_score = min(100, langs * 20)
 
-    # 5. Recency (0-100): last activity
-    activity_score = 50.0  # default
+    # 5. Activity Status (0-100): Binary — any activity = 100
+    activity_score = 0.0
     last_activity = data.get("last_activity", "")
     if last_activity:
-        try:
-            last_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
-            days_ago = (datetime.now(timezone.utc) - last_dt).days
-            activity_score = max(0, 100 - days_ago * 2)  # Decays ~2 pts/day
-        except Exception:
-            pass
+        activity_score = 100.0  # Any tracked activity = full score
 
-    # Weighted total
+    # Weighted total (35/30/15/15/5)
     total = (
-        0.30 * commit_score
-        + 0.25 * repo_score
-        + 0.20 * oss_score
+        0.35 * commit_score
+        + 0.30 * repo_score
+        + 0.15 * oss_score
         + 0.15 * diversity_score
-        + 0.10 * activity_score
+        + 0.05 * activity_score
     )
 
     return {
@@ -202,17 +212,57 @@ Recent commits: {data.get('total_commits_recent', 0)}
 Top repos:
 {repos_text}"""
 
-    try:
-        response = await llm_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=200,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"GitHub summarization failed: {e}")
-        return _basic_summary(data)
+    # Try OpenAI first
+    if openai_client:
+        try:
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=200,
+            )
+            return {"success": True, "summary": response.choices[0].message.content.strip(), "llm": "OpenAI"}
+        except Exception as e:
+            error_msg = str(e)
+            is_quota = "insufficient_quota" in error_msg or "quota_exceeded" in error_msg
+            if not is_quota:
+                logger.error(f"GitHub summarization OpenAI error: {error_msg}")
+            else:
+                logger.info("GitHub summarization OpenAI quota reached, attempting Groq fallback...")
+
+    # Groq Fallback (Primary Fallback)
+    for i, g_client in enumerate(groq_clients):
+        try:
+            response = await g_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=200,
+            )
+            return {"success": True, "summary": response.choices[0].message.content.strip(), "llm": f"Groq (Key {i+1})"}
+        except Exception as e:
+            logger.warning(f"GitHub summarization Groq fallback failed with Key {i+1}: {e}")
+            if i == len(groq_clients) - 1:
+                logger.info("All Groq keys exhausted, attempting Gemini fallback...")
+
+    # Gemini Fallback (Secondary Fallback)
+    if settings.GEMINI_API_KEY:
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = await model.generate_content_async(
+                prompt,
+                generation_config=genai.types.GenerationConfig(temperature=0.3, max_output_tokens=200)
+            )
+            return {"success": True, "summary": response.text.strip(), "llm": "Gemini"}
+        except Exception as e:
+            logger.error(f"GitHub summarization Gemini fallback failed: {e}")
+
+    return {
+        "success": False, 
+        "summary": _basic_summary(data),
+        "error": "All AI services exhausted",
+        "llm": "None (Fallback)"
+    }
 
 
 def _basic_summary(data: dict) -> str:

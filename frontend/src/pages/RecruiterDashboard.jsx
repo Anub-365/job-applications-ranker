@@ -207,17 +207,31 @@ export default function RecruiterDashboard() {
 
                           {/* Skills */}
                           <div className="flex gap-1 flex-wrap mb-2">
-                            {c.skills.slice(0, 6).map(sk => (
-                              <span key={sk.id} className="text-xs px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-300 border border-brand-500/20">
-                                {sk.skill_name} ({sk.confidence_score.toFixed(0)}%)
+                            {c.skills.slice(0, 6).map(sk => {
+                              const isSelfReported = sk.level === 'Self-Reported';
+                              return (
+                                <span 
+                                  key={sk.id} 
+                                  title={isSelfReported ? "Self-Reported (No code evidence)" : `Verified Skill (${sk.level})`}
+                                  className={`text-[10px] px-2 py-0.5 rounded border ${isSelfReported ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' : 'bg-green-500/10 text-green-400 border-green-500/20'}`}
+                                >
+                                  {sk.skill_name} {isSelfReported ? '👤' : '✓'}
+                                </span>
+                              );
+                            })}
+                            {c.skills.length > 6 && (
+                              <span className="text-[10px] px-2 py-0.5 rounded border bg-dark-800 text-dark-400 border-dark-700">
+                                +{c.skills.length - 6} more
                               </span>
-                            ))}
+                            )}
                           </div>
                         </div>
 
-                        <button onClick={() => setExpandedCandidate(expandedCandidate === c.match.id ? null : c.match.id)} className="text-dark-500 hover:text-dark-300 p-1">
-                          {expandedCandidate === c.match.id ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                        </button>
+                        <div className="flex flex-col items-end justify-between h-full py-1">
+                          <button onClick={() => setExpandedCandidate(expandedCandidate === c.match.id ? null : c.match.id)} className="text-dark-500 hover:text-white p-1 transition-colors bg-dark-800 rounded mb-2">
+                            {expandedCandidate === c.match.id ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </div>
 
                       {/* Expanded Details */}

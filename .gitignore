@@ -1,17 +1,36 @@
-# Python
+# ── Python ────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
-.env
+*.egg
 venv/
+.venv/
+*.pyc
 
-# Node
+# ── Environment ───────────────────────────────
+.env
+.env.local
+
+# ── Node ──────────────────────────────────────
 node_modules/
 dist/
+.cache/
 
-# IDE
+# ── IDE ───────────────────────────────────────
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
-# Docker
+# ── OS ────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs & Debug ──────────────────────────────
 *.log
+*.txt
+!requirements.txt
+
+# ── Model Cache ───────────────────────────────
+.cache/

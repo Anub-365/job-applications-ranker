@@ -12,11 +12,17 @@ export default function StudentDashboard() {
   const [profileForm, setProfileForm] = useState({ cgpa: '', branch: '' });
   const [message, setMessage] = useState(null);
   const [matches, setMatches] = useState([]);
+  const [allExtractedSkills, setAllExtractedSkills] = useState(null); // RAW skills from upload
 
   const fetchProfile = async () => {
     try {
       const res = await api.get('/students/profile');
       setProfile(res.data);
+      
+      //dev-2
+      console.log("hi")
+
+      
       setGhUser(res.data.github_username || '');
       setProfileForm({ cgpa: res.data.cgpa || '', branch: res.data.branch || '' });
     } catch {}
@@ -41,10 +47,18 @@ export default function StudentDashboard() {
     fd.append('file', file);
     try {
       const res = await api.post('/students/upload-resume', fd);
-      setMessage({ type: 'success', text: `Resume processed! Found ${res.data.skills_found} skills and ${res.data.projects_found} projects.` });
+      setMessage({ 
+        type: 'success', 
+        text: `Resume processed by ${res.data.llm_used}! Found ${res.data.skills_found} skills and ${res.data.projects_found} projects.` 
+      });
+      setAllExtractedSkills(res.data.all_skills || null);
       fetchProfile();
     } catch (err) {
-      setMessage({ type: 'error', text: err.response?.data?.detail || 'Upload failed' });
+      if (err.response?.status === 429) {
+        setMessage({ type: 'error', text: 'OpenAI API quota exceeded. Please check your API key or billing plan.' });
+      } else {
+        setMessage({ type: 'error', text: err.response?.data?.detail || 'Upload failed' });
+      }
     }
     setUploading(false);
   };
@@ -56,7 +70,15 @@ export default function StudentDashboard() {
     try {
       await api.put('/students/profile', { github_username: ghUser });
       const res = await api.post('/students/connect-github');
-      setMessage({ type: 'success', text: `GitHub connected! Score: ${res.data.scores.total_score}/100` });
+      setMessage({ 
+        type: 'success', 
+        text: `GitHub connected via ${res.data.llm_used}! Score: ${res.data.scores.total_score}/100` 
+      });
+
+      //dev-1
+      console.log(res.data);
+
+
       fetchProfile();
     } catch (err) {
       setMessage({ type: 'error', text: err.response?.data?.detail || 'GitHub connection failed' });
@@ -171,6 +193,39 @@ export default function StudentDashboard() {
           <h2 className="font-semibold text-white mb-4">Extracted Resume Text</h2>
           <div className="bg-dark-900/50 rounded-xl p-4 border border-dark-800 max-h-60 overflow-y-auto w-full text-xs text-dark-300 font-mono whitespace-pre-wrap">
             {profile.resume_text}
+          </div>
+        </div>
+      )}
+
+      {/* Raw Extracted Skills (Debug) */}
+      {allExtractedSkills && (
+        <div className="glass-card p-6 mt-6 border-brand-500/20">
+          <h2 className="font-semibold text-white mb-4">AI Skill Analysis (Triangulation Model)</h2>
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {allExtractedSkills.map((sk, idx) => {
+              const isRejected = sk.is_blacklisted || sk.confidence_score < 30.0;
+              return (
+                <div key={idx} className={`flex flex-col gap-1 p-3 rounded-lg border ${isRejected ? 'bg-red-500/5 border-red-500/20' : sk.is_self_reported ? 'bg-yellow-500/5 border-yellow-500/20' : 'bg-green-500/5 border-green-500/20'}`}>
+                  <div className="flex justify-between items-start">
+                    <span className={`text-sm font-medium ${isRejected ? 'text-dark-300 line-through' : 'text-white'}`}>{sk.skill_name}</span>
+                    <span className="text-xs text-dark-400 font-mono">{sk.confidence_score.toFixed(0)}%</span>
+                  </div>
+                  {sk.evidence && (
+                    <div className="text-[10px] text-dark-500 flex gap-2 mt-1">
+                      <span>Resume: {sk.evidence.base}%</span>
+                      <span>Project: {sk.evidence.project}%</span>
+                      <span>GitHub: {sk.evidence.execution}%</span>
+                    </div>
+                  )}
+                  <div className="text-[10px] text-dark-400 flex flex-wrap gap-1">
+                    {sk.is_blacklisted && <span className="text-red-400">Blacklisted</span>}
+                    {sk.confidence_score < 30.0 && !sk.is_blacklisted && <span className="text-yellow-400">Low Confidence</span>}
+                    {sk.is_self_reported && !isRejected && <span className="text-yellow-400">Self-Reported</span>}
+                    {!isRejected && !sk.is_self_reported && <span className="text-green-400">Verified & Saved</span>}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

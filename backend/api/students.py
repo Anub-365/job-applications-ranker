@@ -83,7 +83,9 @@ async def upload_resume(
     if result.get("error"):
         profile.processing_status = "error"
         await db.flush()
-        raise HTTPException(status_code=422, detail=result["error"])
+        # Return 429 for quota errors, 422 for others
+        status_code = 429 if result.get("is_quota") else 422
+        raise HTTPException(status_code=status_code, detail=result["error"])
 
     profile.resume_text = result["raw_text"]
     profile.resume_structured = result["structured"]
@@ -116,6 +118,10 @@ async def upload_resume(
 
     # Process skills
     raw_skills = structured.get("skills", [])
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"[DEBUG] raw_skills from resume: {raw_skills}")
+    
     github_data = None
     if profile.github_metrics and profile.github_metrics.raw_data:
         github_data = profile.github_metrics.raw_data
@@ -125,25 +131,47 @@ async def upload_resume(
         github_data=github_data,
         projects=structured.get("projects", []),
     )
+    
+    logger.warning(f"[DEBUG] skill_results type: {type(skill_results)}, len: {len(skill_results) if isinstance(skill_results, list) else 'N/A'}")
+    if isinstance(skill_results, list) and skill_results:
+        logger.warning(f"[DEBUG] first skill_result: {skill_results[0]}")
+    else:
+        logger.warning(f"[DEBUG] skill_results value: {skill_results}")
 
     # Clear and re-create skills
     for old_skill in profile.skills:
         await db.delete(old_skill)
     await db.flush()
 
+    saved_count = 0
     for sk in skill_results:
-        skill = Skill(
-            student_id=profile.id,
-            skill_name=sk["skill_name"],
-            confidence_score=sk["confidence_score"],
-            level=sk["level"],
-        )
-        db.add(skill)
+        # GUARDRAIL: Only save if the AI is fairly certain AND not a generic blacklist word
+        # (30.0 is the exact score for a 100% Base match with 0 Project/GitHub evidence = Self-Reported)
+        if sk["confidence_score"] >= 30.0 and not sk.get("is_blacklisted", False):
+            skill = Skill(
+                student_id=profile.id,
+                skill_name=sk["skill_name"],
+                confidence_score=sk["confidence_score"],
+                level=sk["level"],
+            )
+            db.add(skill)
+            saved_count += 1
+            logger.warning(f"[DEBUG] SAVED skill: {sk['skill_name']} ({sk['confidence_score']}%)")
+        else:
+            logger.warning(f"[DEBUG] SKIPPED skill: {sk['skill_name']} ({sk['confidence_score']}%) blacklisted={sk.get('is_blacklisted')}")
+    
+    logger.warning(f"[DEBUG] Total saved to DB: {saved_count}")
 
     profile.processing_status = "done"
     await db.flush()
 
-    return {"message": "Resume processed successfully", "skills_found": len(skill_results), "projects_found": len(structured.get("projects", []))}
+    return {
+        "message": "Resume processed successfully", 
+        "skills_found": len([s for s in skill_results if s["confidence_score"] >= 30.0 and not s.get("is_blacklisted")]),
+        "all_skills": skill_results,
+        "projects_found": len(structured.get("projects", [])),
+        "llm_used": result.get("llm", "Unknown")
+    }
 
 
 @router.post("/connect-github")
@@ -165,7 +193,12 @@ async def connect_github(
     scores = github_service.compute_github_scores(github_data)
 
     # Summarize
-    summary = await github_service.summarize_github(github_data)
+    summary_res = await github_service.summarize_github(github_data)
+    summary = summary_res["summary"]
+    if not summary_res.get("success") and summary_res.get("is_quota"):
+        # We still save the data with basic summary, but we might want to inform the user
+        # For now, let's just proceed but maybe add a flag if we want the frontend to know.
+        pass
 
     # Store / update
     if profile.github_metrics:
@@ -200,6 +233,7 @@ async def connect_github(
         "message": "GitHub connected successfully",
         "scores": scores,
         "summary": summary,
+        "llm_used": summary_res.get("llm", "Unknown")
     }
 
 

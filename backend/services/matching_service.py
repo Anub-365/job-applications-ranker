@@ -14,26 +14,30 @@ logger = logging.getLogger(__name__)
 async def find_semantic_matches(
     db: AsyncSession,
     job_embedding: list,
-    limit: int = 20,
+    limit: int = 50,
 ) -> List[Dict]:
     """Find top student projects by cosine similarity using pgvector."""
-    embedding_str = "[" + ",".join(str(v) for v in job_embedding) + "]"
-
-    query = text("""
-        SELECT
-            p.id AS project_id,
-            p.student_id,
-            p.title AS project_title,
-            p.description AS project_description,
-            1 - (p.embedding <=> :job_embedding::vector) AS semantic_score
-        FROM projects p
-        WHERE p.embedding IS NOT NULL
-        ORDER BY p.embedding <=> :job_embedding::vector
-        LIMIT :limit
-    """)
-
-    result = await db.execute(query, {"job_embedding": embedding_str, "limit": limit})
-    rows = result.fetchall()
+    from sqlalchemy import select
+    from backend.models.models import Project
+    
+    # Ensure it's a list or numpy array that pgvector can serialize
+    emb_vector = list(job_embedding)
+    
+    stmt = (
+        select(
+            Project.id,
+            Project.student_id,
+            Project.title,
+            Project.description,
+            (1 - Project.embedding.cosine_distance(emb_vector)).label("semantic_score")
+        )
+        .where(Project.embedding.is_not(None))
+        .order_by(Project.embedding.cosine_distance(emb_vector))
+        .limit(limit)
+    )
+    
+    result = await db.execute(stmt)
+    rows = result.all()
 
     # Group by student — keep best project per student
     student_matches = {}
@@ -43,9 +47,9 @@ async def find_semantic_matches(
             student_matches[sid] = {
                 "student_id": sid,
                 "semantic_score": round(float(row.semantic_score), 4),
-                "top_project_title": row.project_title,
-                "top_project_description": row.project_description,
-                "project_id": str(row.project_id),
+                "top_project_title": row.title,
+                "top_project_description": row.description,
+                "project_id": str(row.id),
             }
 
     return list(student_matches.values())
@@ -96,6 +100,8 @@ def generate_explanation(
     top_project: str,
     matched_skills: list = None,
     github_summary: str = "",
+    verified_skills: list = None,
+    self_reported_skills: list = None,
 ) -> str:
     """Generate human-readable explanation for a match."""
     reasons = []
@@ -114,6 +120,12 @@ def generate_explanation(
 
     if matched_skills:
         reasons.append(f"Matching skills: {', '.join(matched_skills[:5])}")
+
+    # Add verified skill details if available
+    if verified_skills:
+        reasons.append(f"Verified code found: {', '.join(verified_skills[:3])}")
+    if self_reported_skills:
+        reasons.append(f"Self-reported (no code evidence): {', '.join(self_reported_skills[:3])}")
 
     if top_project:
         reasons.append(f"Top matching project: {top_project}")
@@ -141,8 +153,8 @@ async def run_matching_for_job(
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
 
-    # Step 1: Semantic matches
-    semantic_matches = await find_semantic_matches(db, job_embedding, limit=20)
+    # Step 1: Semantic matches (Top 50 filter)
+    semantic_matches = await find_semantic_matches(db, job_embedding, limit=50)
 
     if not semantic_matches:
         return []
@@ -195,6 +207,16 @@ async def run_matching_for_job(
                 skill_score = sum(s.confidence_score for s in top) / max(len(top), 1)
                 matched_skills = [s.skill_name for s in top]
 
+        # Categorize skills by verification status
+        verified_skills = []
+        self_reported_skills = []
+        if profile.skills:
+            for sk in profile.skills:
+                if hasattr(sk, 'level') and sk.level == 'Self-Reported':
+                    self_reported_skills.append(sk.skill_name)
+                else:
+                    verified_skills.append(sk.skill_name)
+
         # Compute final
         final = compute_final_score(
             semantic_score=match["semantic_score"],
@@ -211,6 +233,8 @@ async def run_matching_for_job(
             top_project=match["top_project_title"],
             matched_skills=matched_skills,
             github_summary=github_summary,
+            verified_skills=verified_skills,
+            self_reported_skills=self_reported_skills,
         )
 
         results.append({
